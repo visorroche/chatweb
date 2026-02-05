@@ -38,12 +38,20 @@ export type ChatMessage = {
   text: string
   createdAt: number
   trace?: ApiTrace
+  /** Itens ricos da resposta (text, cta_url, etc.) para renderização no ChatWeb */
+  answerItems?: DisparoAnswerItem[]
 }
 
 export type DisparoAnswerItem =
   | {
       type: 'text'
       message: string
+    }
+  | {
+      type: 'cta_url'
+      display?: string
+      url: string
+      [key: string]: unknown
     }
   | {
       type: string

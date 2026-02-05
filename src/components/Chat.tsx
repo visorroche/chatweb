@@ -13,6 +13,101 @@ function uuid(): string {
   return `m_${Math.random().toString(16).slice(2)}_${Date.now()}`
 }
 
+function tryParseCtaUrl(text: string): DisparoAnswerItem | null {
+  if (!text || typeof text !== 'string') return null
+  const t = text.trim()
+  if (!t.startsWith('{') || !t.includes('"type"') || !t.includes('cta_url')) return null
+  try {
+    const o = JSON.parse(t) as { type?: string; url?: string; display?: string }
+    if (o && o.type === 'cta_url' && typeof o.url === 'string' && o.url) {
+      return { type: 'cta_url', url: o.url, display: o.display }
+    }
+  } catch {
+    // ignore
+  }
+  return null
+}
+
+function withRedirectUrlParam(href: string, redirectUrl: string): string {
+  try {
+    if (!href || typeof href !== 'string') return href
+    const base =
+      typeof window !== 'undefined' && window.location?.origin ? window.location.origin : 'http://localhost'
+    const url = new URL(href, base)
+    // Se já existe redirect_url, respeita (não sobrescreve)
+    if (url.searchParams.has('redirect_url')) return url.toString()
+    url.searchParams.set('redirect_url', redirectUrl)
+    return url.toString()
+  } catch {
+    return href
+  }
+}
+
+function MessageContent({ items }: { items: DisparoAnswerItem[] }) {
+  return (
+    <div className="msgContent">
+      {items.map((it, i) => {
+        if (!it || typeof it !== 'object') return null
+        const t = (it as { type?: string }).type
+        if (t === 'text') {
+          const msg = (it as { message?: string }).message
+          if (typeof msg === 'string' && msg) {
+            const parsed = tryParseCtaUrl(msg)
+            if (parsed && parsed.type === 'cta_url') {
+              const redirectUrl = typeof window !== 'undefined' ? window.location.href : ''
+              const href = redirectUrl ? withRedirectUrlParam((parsed as any).url, redirectUrl) : (parsed as any).url
+              const display = parsed.display || 'Abrir link'
+              return (
+                <a
+                  key={i}
+                  href={href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="msgCtaBtn"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {display}
+                </a>
+              )
+            }
+            return (
+              <div key={i} className="msgContentItem">
+                {msg}
+              </div>
+            )
+          }
+          return null
+        }
+        if (t === 'cta_url') {
+          const url = (it as { url?: string }).url
+          const redirectUrl = typeof window !== 'undefined' ? window.location.href : ''
+          const href = redirectUrl && typeof url === 'string' && url ? withRedirectUrlParam(url, redirectUrl) : url
+          const display = (it as { display?: string }).display || 'Abrir link'
+          if (typeof href === 'string' && href) {
+            return (
+              <a
+                key={i}
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="msgCtaBtn"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {display}
+              </a>
+            )
+          }
+        }
+        try {
+          return <div key={i} className="msgContentItem">{JSON.stringify(it, null, 2)}</div>
+        } catch {
+          return null
+        }
+      })}
+    </div>
+  )
+}
+
 function itemsToRenderableText(items: DisparoAnswerItem[]): string {
   if (!items.length) return ''
   const parts: string[] = []
@@ -151,6 +246,7 @@ export default function Chat({ settings, onReset }: Props) {
         role: 'assistant',
         text: assistantText,
         createdAt: receivedAt,
+        answerItems,
         trace: {
           request: {
             url: request.url,
@@ -364,15 +460,6 @@ export default function Chat({ settings, onReset }: Props) {
     return `https://platform.openai.com/assistants/edit?assistant=${encodeURIComponent(asst)}&thread=${encodeURIComponent(thread)}`
   }, [activeCtx])
 
-  async function copySelectedJson() {
-    if (!traceValue) return
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(traceValue, null, 2))
-    } catch {
-      // ignore
-    }
-  }
-
   return (
     <div className="split">
       <div className="leftPane">
@@ -407,7 +494,16 @@ export default function Chat({ settings, onReset }: Props) {
                           }
                         }}
                       >
-                        {m.text}
+                        {m.role === 'assistant' ? (
+                          m.answerItems?.length ? (
+                            <MessageContent items={m.answerItems} />
+                          ) : (() => {
+                            const parsed = tryParseCtaUrl(m.text)
+                            return parsed ? <MessageContent items={[parsed]} /> : m.text
+                          })()
+                        ) : (
+                          m.text
+                        )}
                       </div>
                       <div className={`msgMeta ${m.role === 'user' ? 'user' : ''}`}>
                         {timeStr}
@@ -478,11 +574,6 @@ export default function Chat({ settings, onReset }: Props) {
       <div className="rightPane">
         <div className="panelHeader">
           <div className="panelHeaderTitle">{inspected ? `Detalhes (${inspected.title})` : 'Detalhes (request/response)'}</div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn" onClick={() => void copySelectedJson()} disabled={!traceValue}>
-              Copiar JSON
-            </button>
-          </div>
         </div>
         <div className="panelBody">
           {inspectError ? <div className="error">{inspectError}</div> : null}

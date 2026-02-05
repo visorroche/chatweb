@@ -75,8 +75,7 @@ export async function sendMessage(
   }
 }
 
-function extractDisparoItems(data: AiFrameworkResponse): DisparoAnswerItem[] {
-  const raw = data.data?.disparo?.answer
+function toAnswerItems(raw: unknown): DisparoAnswerItem[] {
   if (Array.isArray(raw)) {
     return raw
       .map((x): DisparoAnswerItem | null => {
@@ -89,6 +88,14 @@ function extractDisparoItems(data: AiFrameworkResponse): DisparoAnswerItem[] {
   if (typeof raw === 'string' && raw.trim()) return [{ type: 'text', message: raw }]
   if (raw && typeof raw === 'object') return [raw as DisparoAnswerItem]
   return []
+}
+
+function extractDisparoItems(data: AiFrameworkResponse): DisparoAnswerItem[] {
+  const d = data.data
+  let items = toAnswerItems(d?.disparo?.answer)
+  if (items.length) return items
+  items = toAnswerItems(d?.assistant_response?.answer)
+  return items
 }
 
 function itemsToText(items: DisparoAnswerItem[]): string {
