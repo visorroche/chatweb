@@ -227,6 +227,13 @@ function formatSeconds(ms: number): string {
   return s.toFixed(2)
 }
 
+function formatDeltaFromPrev(curMs: number, prevMs: number | null): string | null {
+  if (prevMs == null) return null
+  const d = curMs - prevMs
+  if (!Number.isFinite(d) || d <= 0) return null
+  return `${formatSeconds(d)}s`
+}
+
 type ConversationContext = {
   assistantId?: string
   customerId?: string
@@ -272,6 +279,29 @@ function extractConversationContextFromResponseJson(json: unknown): Conversation
       ctx.threadAssistantExternalId,
   )
   return hasAny ? ctx : null
+}
+
+function extractOpenMessagesFromSteps(rawResponse: unknown): Array<{ text: string; createdAt: number }> {
+  try {
+    const steps = (rawResponse as any)?.steps
+    if (!Array.isArray(steps)) return []
+    const out: Array<{ text: string; createdAt: number }> = []
+    for (const s of steps) {
+      const name = typeof s?.name === 'string' ? s.name : ''
+      if (!name.startsWith('tool_open_message.') && !name.startsWith('assistant_open_message.')) continue
+      const msg = s?.request?.message
+      if (typeof msg === 'string' && msg.trim()) {
+        const startIso = typeof s?.start === 'string' ? s.start : ''
+        const ms = startIso ? Date.parse(startIso) : NaN
+        out.push({ text: msg.trim(), createdAt: Number.isFinite(ms) ? ms : Date.now() })
+      }
+    }
+    // garantir ordem cronológica (mais antigo -> mais novo)
+    out.sort((a, b) => a.createdAt - b.createdAt)
+    return out
+  } catch {
+    return []
+  }
 }
 
 export default function Chat({ settings, onReset }: Props) {
@@ -367,6 +397,31 @@ export default function Chat({ settings, onReset }: Props) {
         },
       }
 
+      // Se houve "open_message" durante tools, mas o SSE ainda não estava conectado,
+      // reexibe essas mensagens no chat com base no array "steps" da resposta.
+      const openEvents = extractOpenMessagesFromSteps(raw)
+      const openMsgs: ChatMessage[] = []
+      if (openEvents.length) {
+        const tidForDedup = (extractConversationContextFromResponseJson(raw)?.threadId || prevThreadId || '').trim()
+        const now = Date.now()
+        for (const ev of openEvents) {
+          const t = ev.text
+          const ts = typeof ev.createdAt === 'number' && Number.isFinite(ev.createdAt) ? ev.createdAt : now
+          // dedup simples (evita repetir em refresh/retry rápido)
+          const last = lastOpenMsgRef.current
+          if (
+            last &&
+            last.threadId === tidForDedup &&
+            last.text === t &&
+            (now - last.ts < 10_000 || Math.abs(ts - last.ts) < 10_000)
+          ) {
+            continue
+          }
+          lastOpenMsgRef.current = { threadId: tidForDedup, text: t, ts }
+          openMsgs.push({ id: uuid(), role: 'assistant', text: t, createdAt: ts })
+        }
+      }
+
       // 1) Comandos especiais (#close/#delete-user): limpar conversa e "sair" da thread atual.
       try {
         const cmd = String((raw as any)?.data?.command || '').trim().toLowerCase()
@@ -383,6 +438,7 @@ export default function Chat({ settings, onReset }: Props) {
               createdAt: Date.now(),
             },
             userMsg,
+            ...openMsgs,
             assistantMsg,
           ])
           setSelectedId(assistantMsg.id)
@@ -412,6 +468,7 @@ export default function Chat({ settings, onReset }: Props) {
                 createdAt: Date.now(),
               },
               userMsg,
+              ...openMsgs,
               assistantMsg,
             ])
             setSelectedId(assistantMsg.id)
@@ -426,7 +483,7 @@ export default function Chat({ settings, onReset }: Props) {
       } catch {
         // ignore
       }
-      setMessages((prev) => [...prev, assistantMsg])
+      setMessages((prev) => [...prev, ...openMsgs, assistantMsg])
       setSelectedId(assistantMsg.id)
       setInspected(null)
       setInspectError(null)
@@ -827,9 +884,12 @@ export default function Chat({ settings, onReset }: Props) {
         <div className="content">
           <div className="chatWrap">
             <div className="messages" ref={listRef}>
-              {messages.map((m) => {
+              {messages.map((m, idx) => {
                 const isSelected = m.id === selectedId
                 const timeStr = formatHms(m.createdAt)
+                const prev = idx > 0 ? messages[idx - 1] : null
+                const deltaStr =
+                  m.role === 'assistant' ? formatDeltaFromPrev(m.createdAt, prev?.createdAt ?? null) : null
                 const latencyStr =
                   m.role === 'assistant' && m.trace ? ` (${formatSeconds(m.trace.timingMs)}s)` : ''
                 return (
@@ -870,6 +930,7 @@ export default function Chat({ settings, onReset }: Props) {
                       </div>
                       <div className={`msgMeta ${m.role === 'user' ? 'user' : ''}`}>
                         {timeStr}
+                        {deltaStr ? ` (${deltaStr})` : ''}
                         {m.role === 'assistant' ? latencyStr : ''}
                       </div>
                     </div>
@@ -889,7 +950,6 @@ export default function Chat({ settings, onReset }: Props) {
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={onComposerKeyDown}
                 placeholder="Escreva uma mensagem… (Enter envia, Shift+Enter nova linha)"
-                disabled={loading}
               />
               <button className="btn primary" onClick={() => void onSend()} disabled={loading || !draft.trim()}>
                 Enviar
