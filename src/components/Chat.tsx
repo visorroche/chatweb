@@ -28,6 +28,32 @@ function tryParseCtaUrl(text: string): DisparoAnswerItem | null {
   return null
 }
 
+function tryParseDisparoItemsFromText(text: string): DisparoAnswerItem[] | null {
+  if (!text || typeof text !== 'string') return null
+  const t = text.trim()
+  if (!t) return null
+  // aceita JSON objeto ou array
+  if (!(t.startsWith('{') || t.startsWith('['))) return null
+  if (!t.includes('"type"')) return null
+  try {
+    const parsed = JSON.parse(t) as any
+    if (Array.isArray(parsed)) {
+      const out: DisparoAnswerItem[] = []
+      for (const it of parsed) {
+        if (typeof it === 'string') out.push({ type: 'text', message: it })
+        else if (it && typeof it === 'object') out.push(it as DisparoAnswerItem)
+      }
+      return out.length ? out : null
+    }
+    if (parsed && typeof parsed === 'object') {
+      return [parsed as DisparoAnswerItem]
+    }
+  } catch {
+    // ignore
+  }
+  return null
+}
+
 function withRedirectUrlParam(href: string, redirectUrl: string): string {
   try {
     if (!href || typeof href !== 'string') return href
@@ -43,6 +69,77 @@ function withRedirectUrlParam(href: string, redirectUrl: string): string {
   }
 }
 
+function getThreadIdFromLocation(): string | null {
+  try {
+    if (typeof window === 'undefined') return null
+    const sp = new URLSearchParams(window.location.search || '')
+    const tid = (sp.get('thread_id') || sp.get('threadId') || '').trim()
+    return tid || null
+  } catch {
+    return null
+  }
+}
+
+function setThreadIdInLocation(threadId: string | null) {
+  try {
+    if (typeof window === 'undefined') return
+    const url = new URL(window.location.href)
+    const tid = (threadId || '').trim()
+    const prev = (url.searchParams.get('thread_id') || '').trim()
+    if (tid) url.searchParams.set('thread_id', tid)
+    else url.searchParams.delete('thread_id')
+    if (url.searchParams.has('threadId')) url.searchParams.delete('threadId')
+    // Evitar re-renderizações inúteis
+    if ((prev || '') === (tid || '') && String(window.location.href) === String(url.toString())) return
+    window.history.replaceState({}, '', url.toString())
+    try {
+      window.dispatchEvent(new CustomEvent('chatweb:thread_id_changed', { detail: { thread_id: tid || null } }))
+    } catch {
+      // ignore
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function FormattedText({ text }: { text: string }) {
+  // Interpreta *texto* como <strong>texto</strong> (formatação simples).
+  // Regras:
+  // - Só aplica quando encontra pares de '*'
+  // - Se não houver par, mantém literal
+  // - Não usa HTML (evita XSS)
+  const nodes: React.ReactNode[] = []
+  let i = 0
+  let k = 0
+  while (i < text.length) {
+    const start = text.indexOf('*', i)
+    if (start === -1) {
+      const tail = text.slice(i)
+      if (tail) nodes.push(<span key={`t_${k++}`}>{tail}</span>)
+      break
+    }
+    const end = text.indexOf('*', start + 1)
+    if (end === -1) {
+      const tail = text.slice(i)
+      if (tail) nodes.push(<span key={`t_${k++}`}>{tail}</span>)
+      break
+    }
+
+    const before = text.slice(i, start)
+    if (before) nodes.push(<span key={`t_${k++}`}>{before}</span>)
+
+    const content = text.slice(start + 1, end)
+    if (content.trim().length === 0) {
+      // Mantém literal para não “sumir” com asteriscos vazios
+      nodes.push(<span key={`t_${k++}`}>{text.slice(start, end + 1)}</span>)
+    } else {
+      nodes.push(<strong key={`b_${k++}`}>{content}</strong>)
+    }
+    i = end + 1
+  }
+  return <>{nodes}</>
+}
+
 function MessageContent({ items }: { items: DisparoAnswerItem[] }) {
   return (
     <div className="msgContent">
@@ -52,14 +149,31 @@ function MessageContent({ items }: { items: DisparoAnswerItem[] }) {
         if (t === 'text') {
           const msg = (it as { message?: string }).message
           if (typeof msg === 'string' && msg) {
-            const parsed = tryParseCtaUrl(msg)
-            if (parsed && parsed.type === 'cta_url') {
-              const redirectUrl = typeof window !== 'undefined' ? window.location.href : ''
-              const href = redirectUrl ? withRedirectUrlParam((parsed as any).url, redirectUrl) : (parsed as any).url
-              const display = parsed.display || 'Abrir link'
-              return (
+            const parsedItems = tryParseDisparoItemsFromText(msg)
+            if (parsedItems?.length) return <MessageContent key={i} items={parsedItems} />
+            return (
+              <div key={i} className="msgContentItem">
+                <FormattedText text={msg} />
+              </div>
+            )
+          }
+          return null
+        }
+        if (t === 'cta_url') {
+          const url = (it as { url?: string }).url
+          const msg = (it as { message?: string }).message
+          const redirectUrl = typeof window !== 'undefined' ? window.location.href : ''
+          const href = redirectUrl && typeof url === 'string' && url ? withRedirectUrlParam(url, redirectUrl) : url
+          const display = (it as { display?: string }).display || 'Abrir link'
+          if (typeof href === 'string' && href) {
+            return (
+              <div key={i} className="msgContentItem">
+                {typeof msg === 'string' && msg.trim() ? (
+                  <div style={{ marginBottom: 8 }}>
+                    <FormattedText text={msg} />
+                  </div>
+                ) : null}
                 <a
-                  key={i}
                   href={href}
                   target="_blank"
                   rel="noopener noreferrer"
@@ -68,33 +182,7 @@ function MessageContent({ items }: { items: DisparoAnswerItem[] }) {
                 >
                   {display}
                 </a>
-              )
-            }
-            return (
-              <div key={i} className="msgContentItem">
-                {msg}
               </div>
-            )
-          }
-          return null
-        }
-        if (t === 'cta_url') {
-          const url = (it as { url?: string }).url
-          const redirectUrl = typeof window !== 'undefined' ? window.location.href : ''
-          const href = redirectUrl && typeof url === 'string' && url ? withRedirectUrlParam(url, redirectUrl) : url
-          const display = (it as { display?: string }).display || 'Abrir link'
-          if (typeof href === 'string' && href) {
-            return (
-              <a
-                key={i}
-                href={href}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="msgCtaBtn"
-                onClick={(e) => e.stopPropagation()}
-              >
-                {display}
-              </a>
             )
           }
         }
@@ -203,8 +291,30 @@ export default function Chat({ settings, onReset }: Props) {
   const [inspected, setInspected] = useState<{ title: string; value: unknown } | null>(null)
   const [inspectLoading, setInspectLoading] = useState(false)
   const [inspectError, setInspectError] = useState<string | null>(null)
+  const [loadedThreadId, setLoadedThreadId] = useState<string | null>(null)
 
   const listRef = useRef<HTMLDivElement | null>(null)
+  const suppressNextUrlSyncRef = useRef(false)
+  const sseRef = useRef<EventSource | null>(null)
+  const lastOpenMsgRef = useRef<{ threadId: string; text: string; ts: number } | null>(null)
+
+  function resetConversation(systemText?: string) {
+    const now = Date.now()
+    setMessages([
+      {
+        id: uuid(),
+        role: 'system',
+        text:
+          systemText ||
+          'Conversa iniciada. Envie uma mensagem para o ai-framework (provider: simple).',
+        createdAt: now,
+      },
+    ])
+    setSelectedId(null)
+    setInspected(null)
+    setInspectError(null)
+    setError(null)
+  }
 
   useEffect(() => {
     const el = listRef.current
@@ -229,6 +339,8 @@ export default function Chat({ settings, onReset }: Props) {
     setDraft('')
     setError(null)
 
+    const prevThreadId = getThreadIdFromLocation()
+
     const sentAt = Date.now()
     const userMsg: ChatMessage = { id: uuid(), role: 'user', text, createdAt: sentAt }
     setMessages((prev) => [...prev, userMsg])
@@ -239,6 +351,7 @@ export default function Chat({ settings, onReset }: Props) {
       const res = await sendMessage(settings, text)
       const { answerItems, answerText, raw, status, ok, request, rawText, timingMs } = res
       const assistantText = (itemsToRenderableText(answerItems) || answerText || '').trim() || '[sem resposta]'
+
       const receivedAt = Date.now()
       const measuredTimingMs = Number.isFinite(timingMs) && timingMs > 0 ? timingMs : receivedAt - sentAt
       const assistantMsg: ChatMessage = {
@@ -248,19 +361,70 @@ export default function Chat({ settings, onReset }: Props) {
         createdAt: receivedAt,
         answerItems,
         trace: {
-          request: {
-            url: request.url,
-            method: 'POST',
-            payload: request.payload,
-          },
-          response: {
-            status,
-            ok,
-            json: raw,
-            rawText,
-          },
+          request: { url: request.url, method: 'POST', payload: request.payload },
+          response: { status, ok, json: raw, rawText },
           timingMs: measuredTimingMs,
         },
+      }
+
+      // 1) Comandos especiais (#close/#delete-user): limpar conversa e "sair" da thread atual.
+      try {
+        const cmd = String((raw as any)?.data?.command || '').trim().toLowerCase()
+        const action = String((raw as any)?.data?.action || '').trim().toLowerCase()
+        if (cmd === '#close' || cmd === '#delete-user' || action === 'close_threads' || action === 'delete_user') {
+          suppressNextUrlSyncRef.current = true
+          setThreadIdInLocation(null)
+          setLoadedThreadId(null)
+          setMessages([
+            {
+              id: uuid(),
+              role: 'system',
+              text: 'Conversa encerrada. Você já pode iniciar uma nova conversa.',
+              createdAt: Date.now(),
+            },
+            userMsg,
+            assistantMsg,
+          ])
+          setSelectedId(assistantMsg.id)
+          setInspected(null)
+          setInspectError(null)
+          return
+        }
+      } catch {
+        // ignore
+      }
+
+      // 2) Persistir thread_id na URL; se mudou, limpar histórico anterior e carregar histórico da nova thread.
+      try {
+        const ctx = extractConversationContextFromResponseJson(raw)
+        const nextThreadId = (ctx?.threadId || '').trim() || null
+        if (nextThreadId) {
+          if (prevThreadId && prevThreadId !== nextThreadId) {
+            // Troca de thread: limpa o histórico anterior, mas mantém o trace real desta requisição.
+            suppressNextUrlSyncRef.current = true
+            setThreadIdInLocation(nextThreadId)
+            setLoadedThreadId(nextThreadId)
+            setMessages([
+              {
+                id: uuid(),
+                role: 'system',
+                text: `Thread: ${nextThreadId}`,
+                createdAt: Date.now(),
+              },
+              userMsg,
+              assistantMsg,
+            ])
+            setSelectedId(assistantMsg.id)
+            setInspected(null)
+            setInspectError(null)
+            return
+          }
+          suppressNextUrlSyncRef.current = true
+          setThreadIdInLocation(nextThreadId)
+          setLoadedThreadId(nextThreadId)
+        }
+      } catch {
+        // ignore
       }
       setMessages((prev) => [...prev, assistantMsg])
       setSelectedId(assistantMsg.id)
@@ -322,6 +486,121 @@ export default function Chat({ settings, onReset }: Props) {
     const base = (settings.apiBaseUrl || '').trim().replace(/\/+$/, '')
     if (!base) return path.startsWith('/') ? path : `/${path}`
     return `${base}${path.startsWith('/') ? path : `/${path}`}`
+  }
+
+  function parseDateToMs(v: unknown): number {
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+    if (typeof v === 'string' && v.trim()) {
+      const ms = Date.parse(v)
+      if (Number.isFinite(ms)) return ms
+    }
+    return Date.now()
+  }
+
+  function buildSyntheticTraceFromThreadMessage(thread: any, row: any, timingMs: number) {
+    try {
+      const ta = row?.thread_assistant || null
+      const asst = ta?.assistant || null
+      const payload = {
+        success: true,
+        provider: 'simple',
+        data: {
+          assistant_id: ta?.assistant_id ?? undefined,
+          thread_current_assistant_id: ta?.assistant_id ?? undefined,
+          customer_id: thread?.customer_id ?? undefined,
+          company_id: thread?.company_id ?? undefined,
+          thread_id: thread?.id ?? undefined,
+          platform: asst?.platform ?? undefined,
+          external_id: asst?.external_id ?? undefined,
+          thread_assistant_external_id: ta?.external_id ?? undefined,
+        },
+      }
+      return {
+        request: {
+          url: buildApiUrl(`/v1/threads/${encodeURIComponent(String(thread?.id || ''))}/messages`),
+          method: 'POST' as const,
+          payload: {},
+        },
+        response: {
+          status: 200,
+          ok: true,
+          json: payload,
+          rawText: null,
+        },
+        timingMs,
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  async function loadThreadToChat(threadId: string) {
+    const tid = (threadId || '').trim()
+    if (!tid) return
+    if (inspectLoading) return
+    setInspectLoading(true)
+    setInspectError(null)
+    setError(null)
+    try {
+      const url = buildApiUrl(`/v1/threads/${encodeURIComponent(tid)}/messages`)
+      const resp = await fetch(url)
+      const text = await resp.text()
+      const json = text ? JSON.parse(text) : null
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}: ${text}`)
+      }
+
+      const thread = (json as any)?.thread
+      const rows = ((json as any)?.messages || []) as any[]
+
+      const nextMessages: ChatMessage[] = [
+        {
+          id: uuid(),
+          role: 'system',
+          text: `Thread carregada: ${tid}`,
+          createdAt: Date.now(),
+        },
+      ]
+
+      for (const row of rows) {
+        const createdAt = parseDateToMs(row?.created_at)
+        const repliedAt = row?.replied_at != null ? parseDateToMs(row?.replied_at) : null
+        const input = row?.input
+        const output = row?.output
+
+        if (typeof input === 'string' && input.trim()) {
+          nextMessages.push({
+            id: uuid(),
+            role: 'user',
+            text: input,
+            createdAt,
+          })
+        }
+
+        if (typeof output === 'string' && output.trim()) {
+          const timingMs = repliedAt != null ? Math.max(0, repliedAt - createdAt) : 0
+          nextMessages.push({
+            id: uuid(),
+            role: 'assistant',
+            text: output,
+            createdAt: repliedAt ?? createdAt,
+            trace: buildSyntheticTraceFromThreadMessage(thread, row, timingMs),
+          })
+        }
+      }
+
+      setMessages(nextMessages)
+      setSelectedId(nextMessages[nextMessages.length - 1]?.id || null)
+      setInspected(null)
+      setLoadedThreadId(tid)
+      setThreadIdInLocation(tid)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Erro ao carregar thread'
+      setInspectError(msg)
+      setInspected({ title: `threads: ${tid}`, value: { error: msg } })
+    } finally {
+      setInspectLoading(false)
+    }
   }
 
   async function inspectAssistant() {
@@ -402,31 +681,9 @@ export default function Chat({ settings, onReset }: Props) {
   }
 
   async function inspectThread() {
-    const tid = activeCtx?.threadId
+    const tid = activeCtx?.threadId || getThreadIdFromLocation()
     if (!tid) return
-    setInspectLoading(true)
-    setInspectError(null)
-    try {
-      const url = buildApiUrl(`/v1/threads/${encodeURIComponent(tid)}/messages`)
-      const resp = await fetch(url)
-      const text = await resp.text()
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}: ${text}`)
-      }
-      let json: any = null
-      try {
-        json = text ? JSON.parse(text) : null
-      } catch {
-        json = { raw: text }
-      }
-      setInspected({ title: `threads: ${tid}`, value: json })
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Erro ao carregar thread'
-      setInspectError(msg)
-      setInspected({ title: `threads: ${tid}`, value: { error: msg } })
-    } finally {
-      setInspectLoading(false)
-    }
+    await loadThreadToChat(tid)
   }
 
   const selectedIndex = useMemo(() => messages.findIndex((m) => m.id === selectedId), [messages, selectedId])
@@ -450,6 +707,110 @@ export default function Chat({ settings, onReset }: Props) {
     }
     return null
   }, [messages, selectedIndex])
+
+  useEffect(() => {
+    function syncFromUrl() {
+      if (suppressNextUrlSyncRef.current) {
+        suppressNextUrlSyncRef.current = false
+        return
+      }
+      const tid = getThreadIdFromLocation()
+      if (!tid) {
+        // Sem thread_id: iniciar conversa "limpa"
+        setLoadedThreadId(null)
+        resetConversation()
+        return
+      }
+      if (loadedThreadId === tid) return
+      resetConversation(`Carregando thread: ${tid}...`)
+      void loadThreadToChat(tid)
+    }
+
+    // Inicial
+    syncFromUrl()
+
+    // Mudança por back/forward ou por replaceState (evento custom)
+    window.addEventListener('popstate', syncFromUrl)
+    window.addEventListener('chatweb:thread_id_changed', syncFromUrl as any)
+    return () => {
+      window.removeEventListener('popstate', syncFromUrl)
+      window.removeEventListener('chatweb:thread_id_changed', syncFromUrl as any)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadedThreadId, settings.apiBaseUrl])
+
+  useEffect(() => {
+    const tid = (loadedThreadId || getThreadIdFromLocation() || '').trim()
+
+    // Close SSE if no thread
+    if (!tid) {
+      try {
+        sseRef.current?.close()
+      } catch {
+        // ignore
+      }
+      sseRef.current = null
+      return
+    }
+
+    // Reconnect only if thread changed
+    const curUrl = (() => {
+      const base = (settings.apiBaseUrl || '').trim().replace(/\/+$/, '')
+      const path = `/v1/stream?session_id=${encodeURIComponent(tid)}`
+      return base ? `${base}${path}` : path
+    })()
+
+    try {
+      // Se já existe e está no mesmo thread, mantém
+      // (EventSource não expõe url de forma consistente; guardamos pela nossa ref)
+      sseRef.current?.close()
+    } catch {
+      // ignore
+    }
+
+    const es = new EventSource(curUrl)
+    sseRef.current = es
+
+    es.onmessage = (ev) => {
+      try {
+        const data = ev?.data
+        if (typeof data !== 'string' || !data.trim()) return
+        const msg = JSON.parse(data) as any
+        if (!msg || typeof msg !== 'object') return
+        if (msg.type === 'open_message' && typeof msg.text === 'string' && msg.text.trim()) {
+          const text = msg.text.trim()
+          const now = Date.now()
+          const last = lastOpenMsgRef.current
+          if (last && last.threadId === tid && last.text === text && now - last.ts < 5000) return
+          lastOpenMsgRef.current = { threadId: tid, text, ts: now }
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: uuid(),
+              role: 'assistant',
+              text,
+              createdAt: now,
+            },
+          ])
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    es.onerror = () => {
+      // EventSource faz retry automático; não spammar UI.
+    }
+
+    return () => {
+      try {
+        es.close()
+      } catch {
+        // ignore
+      }
+      if (sseRef.current === es) sseRef.current = null
+    }
+  }, [loadedThreadId, settings.apiBaseUrl])
 
   const openAiThreadUrl = useMemo(() => {
     if (!activeCtx) return null
@@ -498,11 +859,13 @@ export default function Chat({ settings, onReset }: Props) {
                           m.answerItems?.length ? (
                             <MessageContent items={m.answerItems} />
                           ) : (() => {
+                            const parsedItems = tryParseDisparoItemsFromText(m.text)
+                            if (parsedItems?.length) return <MessageContent items={parsedItems} />
                             const parsed = tryParseCtaUrl(m.text)
-                            return parsed ? <MessageContent items={[parsed]} /> : m.text
+                            return parsed ? <MessageContent items={[parsed]} /> : <FormattedText text={m.text} />
                           })()
                         ) : (
-                          m.text
+                          <FormattedText text={m.text} />
                         )}
                       </div>
                       <div className={`msgMeta ${m.role === 'user' ? 'user' : ''}`}>

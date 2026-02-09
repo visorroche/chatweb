@@ -39,6 +39,8 @@ export default function Onboarding({ initial, onStart }: Props) {
   const [companies, setCompanies] = useState<CompanyOption[]>([])
   const [companiesLoading, setCompaniesLoading] = useState(false)
   const [companiesError, setCompaniesError] = useState<string | null>(null)
+  const [starting, setStarting] = useState(false)
+  const [startError, setStartError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -72,6 +74,34 @@ export default function Onboarding({ initial, onStart }: Props) {
   const canStart = useMemo(() => {
     return companyId.trim().length > 0 && normalizeDigits(customerPhone).length >= 8
   }, [companyId, customerPhone])
+
+  function setThreadIdInLocation(threadId: string | null) {
+    try {
+      if (typeof window === 'undefined') return
+      const url = new URL(window.location.href)
+      if (threadId && threadId.trim()) url.searchParams.set('thread_id', threadId.trim())
+      else url.searchParams.delete('thread_id')
+      if (url.searchParams.has('threadId')) url.searchParams.delete('threadId')
+      window.history.replaceState({}, '', url.toString())
+    } catch {
+      // ignore
+    }
+  }
+
+  async function resolveOpenThreadId(): Promise<string | null> {
+    const cid = companyId.trim()
+    const phone = normalizeDigits(customerPhone)
+    if (!cid || !phone) return null
+    const base = (apiBaseUrl || '').trim().replace(/\/+$/, '')
+    const url = base ? `${base}/v1/threads/open?company_id=${encodeURIComponent(cid)}&customer_phone=${encodeURIComponent(phone)}` :
+      `/v1/threads/open?company_id=${encodeURIComponent(cid)}&customer_phone=${encodeURIComponent(phone)}`
+    const resp = await fetch(url)
+    const text = await resp.text()
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${text}`)
+    const json = text ? (JSON.parse(text) as any) : null
+    const tid = (json?.thread_id || '').trim()
+    return tid || null
+  }
 
   return (
     <div className="content">
@@ -147,19 +177,34 @@ export default function Onboarding({ initial, onStart }: Props) {
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
           <button
             className="btn primary"
-            disabled={!canStart}
-            onClick={() =>
+            disabled={!canStart || starting}
+            onClick={async () => {
+              setStarting(true)
+              setStartError(null)
+              try {
+                const tid = await resolveOpenThreadId()
+                setThreadIdInLocation(tid)
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : 'Erro ao resolver thread aberta'
+                setStartError(msg)
+                // Se falhar, ainda assim permite iniciar a conversa (sem thread_id)
+                setThreadIdInLocation(null)
+              } finally {
+                setStarting(false)
+              }
+
               onStart({
                 companyId: companyId.trim(),
                 customerPhone: normalizeDigits(customerPhone),
                 customerName: customerName.trim() || undefined,
                 apiBaseUrl,
               })
-            }
+            }}
           >
-            Iniciar conversa
+            {starting ? 'Carregando…' : 'Iniciar conversa'}
           </button>
         </div>
+        {startError ? <div className="helper" style={{ color: 'rgba(255,255,255,0.8)', marginTop: 10 }}>{startError}</div> : null}
       </div>
     </div>
   )
