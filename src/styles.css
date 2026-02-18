@@ -349,6 +349,16 @@ a {
   border-color: rgba(79, 140, 255, 0.6);
 }
 
+.msgInlineLink {
+  color: rgba(79, 140, 255, 0.95);
+  text-decoration: underline;
+  font-weight: 650;
+}
+
+.msgInlineLink:hover {
+  color: rgba(110, 231, 183, 0.95);
+}
+
 .composer {
   padding: 12px;
   border-top: 1px solid var(--border);

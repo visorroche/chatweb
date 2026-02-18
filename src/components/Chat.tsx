@@ -102,12 +102,18 @@ function setThreadIdInLocation(threadId: string | null) {
   }
 }
 
-function FormattedText({ text }: { text: string }) {
-  // Interpreta *texto* como <strong>texto</strong> (formatação simples).
-  // Regras:
-  // - Só aplica quando encontra pares de '*'
-  // - Se não houver par, mantém literal
-  // - Não usa HTML (evita XSS)
+function sanitizeHttpUrl(url: string): string | null {
+  try {
+    const u = new URL(url)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+    return u.toString()
+  } catch {
+    return null
+  }
+}
+
+function renderBoldNodes(text: string, keyPrefix: string): React.ReactNode[] {
+  // Interpreta *texto* como <strong>texto</strong>.
   const nodes: React.ReactNode[] = []
   let i = 0
   let k = 0
@@ -115,27 +121,71 @@ function FormattedText({ text }: { text: string }) {
     const start = text.indexOf('*', i)
     if (start === -1) {
       const tail = text.slice(i)
-      if (tail) nodes.push(<span key={`t_${k++}`}>{tail}</span>)
+      if (tail) nodes.push(<span key={`${keyPrefix}t_${k++}`}>{tail}</span>)
       break
     }
     const end = text.indexOf('*', start + 1)
     if (end === -1) {
       const tail = text.slice(i)
-      if (tail) nodes.push(<span key={`t_${k++}`}>{tail}</span>)
+      if (tail) nodes.push(<span key={`${keyPrefix}t_${k++}`}>{tail}</span>)
       break
     }
 
     const before = text.slice(i, start)
-    if (before) nodes.push(<span key={`t_${k++}`}>{before}</span>)
+    if (before) nodes.push(<span key={`${keyPrefix}t_${k++}`}>{before}</span>)
 
     const content = text.slice(start + 1, end)
     if (content.trim().length === 0) {
-      // Mantém literal para não “sumir” com asteriscos vazios
-      nodes.push(<span key={`t_${k++}`}>{text.slice(start, end + 1)}</span>)
+      nodes.push(<span key={`${keyPrefix}t_${k++}`}>{text.slice(start, end + 1)}</span>)
     } else {
-      nodes.push(<strong key={`b_${k++}`}>{content}</strong>)
+      nodes.push(<strong key={`${keyPrefix}b_${k++}`}>{content}</strong>)
     }
     i = end + 1
+  }
+  return nodes
+}
+
+function FormattedRichText({ text }: { text: string }) {
+  // Suporta:
+  // - *negrito*
+  // - links no padrão [Nome](http://...)
+  // Sem usar HTML (evita XSS).
+  const nodes: React.ReactNode[] = []
+  const re = /\[([^\]]+)\]\(([^)\s]+)\)/g
+  let last = 0
+  let m: RegExpExecArray | null
+  let idx = 0
+  while ((m = re.exec(text)) !== null) {
+    const start = m.index
+    const full = m[0]
+    const label = m[1] || ''
+    const hrefRaw = m[2] || ''
+    if (start > last) {
+      const chunk = text.slice(last, start)
+      nodes.push(...renderBoldNodes(chunk, `c${idx++}_`))
+    }
+    const href = sanitizeHttpUrl(hrefRaw)
+    if (href) {
+      nodes.push(
+        <a
+          key={`l${idx++}`}
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="msgInlineLink"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {label || href}
+        </a>,
+      )
+    } else {
+      // Se URL inválida, mantém literal
+      nodes.push(...renderBoldNodes(full, `c${idx++}_`))
+    }
+    last = start + full.length
+  }
+  if (last < text.length) {
+    nodes.push(...renderBoldNodes(text.slice(last), `c${idx++}_`))
   }
   return <>{nodes}</>
 }
@@ -146,22 +196,9 @@ function MessageContent({ items }: { items: DisparoAnswerItem[] }) {
       {items.map((it, i) => {
         if (!it || typeof it !== 'object') return null
         const t = (it as { type?: string }).type
-        if (t === 'text') {
-          const msg = (it as { message?: string }).message
-          if (typeof msg === 'string' && msg) {
-            const parsedItems = tryParseDisparoItemsFromText(msg)
-            if (parsedItems?.length) return <MessageContent key={i} items={parsedItems} />
-            return (
-              <div key={i} className="msgContentItem">
-                <FormattedText text={msg} />
-              </div>
-            )
-          }
-          return null
-        }
+        const msg = (it as { message?: string }).message
         if (t === 'cta_url') {
           const url = (it as { url?: string }).url
-          const msg = (it as { message?: string }).message
           const redirectUrl = typeof window !== 'undefined' ? window.location.href : ''
           const href = redirectUrl && typeof url === 'string' && url ? withRedirectUrlParam(url, redirectUrl) : url
           const display = (it as { display?: string }).display || 'Abrir link'
@@ -170,7 +207,7 @@ function MessageContent({ items }: { items: DisparoAnswerItem[] }) {
               <div key={i} className="msgContentItem">
                 {typeof msg === 'string' && msg.trim() ? (
                   <div style={{ marginBottom: 8 }}>
-                    <FormattedText text={msg} />
+                    <FormattedRichText text={msg} />
                   </div>
                 ) : null}
                 <a
@@ -186,6 +223,18 @@ function MessageContent({ items }: { items: DisparoAnswerItem[] }) {
             )
           }
         }
+
+        // Regra geral: qualquer type com "message" string usa a mesma formatação.
+        if (typeof msg === 'string' && msg) {
+          const parsedItems = tryParseDisparoItemsFromText(msg)
+          if (parsedItems?.length) return <MessageContent key={i} items={parsedItems} />
+          return (
+            <div key={i} className="msgContentItem">
+              <FormattedRichText text={msg} />
+            </div>
+          )
+        }
+
         try {
           return <div key={i} className="msgContentItem">{JSON.stringify(it, null, 2)}</div>
         } catch {
@@ -200,7 +249,11 @@ function itemsToRenderableText(items: DisparoAnswerItem[]): string {
   if (!items.length) return ''
   const parts: string[] = []
   for (const it of items) {
-    if (it && typeof it === 'object' && (it as any).type === 'text' && typeof (it as any).message === 'string') {
+    if (
+      it &&
+      typeof it === 'object' &&
+      typeof (it as any).message === 'string'
+    ) {
       parts.push((it as any).message)
     } else {
       try {
@@ -281,19 +334,20 @@ function extractConversationContextFromResponseJson(json: unknown): Conversation
   return hasAny ? ctx : null
 }
 
-function extractOpenMessagesFromSteps(rawResponse: unknown): Array<{ text: string; createdAt: number }> {
+function extractOpenMessagesFromSteps(rawResponse: unknown): Array<{ eventId?: string; text: string; createdAt: number }> {
   try {
     const steps = (rawResponse as any)?.steps
     if (!Array.isArray(steps)) return []
-    const out: Array<{ text: string; createdAt: number }> = []
+    const out: Array<{ eventId?: string; text: string; createdAt: number }> = []
     for (const s of steps) {
       const name = typeof s?.name === 'string' ? s.name : ''
       if (!name.startsWith('tool_open_message.') && !name.startsWith('assistant_open_message.')) continue
       const msg = s?.request?.message
       if (typeof msg === 'string' && msg.trim()) {
+        const eventId = typeof s?.id === 'string' ? s.id : undefined
         const startIso = typeof s?.start === 'string' ? s.start : ''
         const ms = startIso ? Date.parse(startIso) : NaN
-        out.push({ text: msg.trim(), createdAt: Number.isFinite(ms) ? ms : Date.now() })
+        out.push({ eventId, text: msg.trim(), createdAt: Number.isFinite(ms) ? ms : Date.now() })
       }
     }
     // garantir ordem cronológica (mais antigo -> mais novo)
@@ -327,6 +381,7 @@ export default function Chat({ settings, onReset }: Props) {
   const suppressNextUrlSyncRef = useRef(false)
   const sseRef = useRef<EventSource | null>(null)
   const lastOpenMsgRef = useRef<{ threadId: string; text: string; ts: number } | null>(null)
+  const seenOpenEventIdsRef = useRef<Set<string>>(new Set())
 
   function resetConversation(systemText?: string) {
     const now = Date.now()
@@ -380,21 +435,46 @@ export default function Chat({ settings, onReset }: Props) {
     try {
       const res = await sendMessage(settings, text)
       const { answerItems, answerText, raw, status, ok, request, rawText, timingMs } = res
-      const assistantText = (itemsToRenderableText(answerItems) || answerText || '').trim() || '[sem resposta]'
 
       const receivedAt = Date.now()
       const measuredTimingMs = Number.isFinite(timingMs) && timingMs > 0 ? timingMs : receivedAt - sentAt
-      const assistantMsg: ChatMessage = {
-        id: uuid(),
-        role: 'assistant',
-        text: assistantText,
-        createdAt: receivedAt,
-        answerItems,
-        trace: {
-          request: { url: request.url, method: 'POST', payload: request.payload },
-          response: { status, ok, json: raw, rawText },
-          timingMs: measuredTimingMs,
-        },
+      // Render: cada item vira uma "bolha" separada (em vez de agrupar tudo numa só mensagem)
+      const items = Array.isArray(answerItems) ? answerItems : []
+      const assistantMsgs: ChatMessage[] = []
+      if (items.length) {
+        for (let i = 0; i < items.length; i++) {
+          const it = items[i]
+          const perText = (itemsToRenderableText([it]) || '').trim() || '[sem resposta]'
+          assistantMsgs.push({
+            id: uuid(),
+            role: 'assistant',
+            text: perText,
+            createdAt: receivedAt + i, // garante ordenação estável no UI
+            answerItems: [it],
+            // trace só no último item (evita duplicar painel de detalhes)
+            trace:
+              i === items.length - 1
+                ? {
+                    request: { url: request.url, method: 'POST', payload: request.payload },
+                    response: { status, ok, json: raw, rawText },
+                    timingMs: measuredTimingMs,
+                  }
+                : undefined,
+          })
+        }
+      } else {
+        const assistantText = (itemsToRenderableText([]) || answerText || '').trim() || '[sem resposta]'
+        assistantMsgs.push({
+          id: uuid(),
+          role: 'assistant',
+          text: assistantText,
+          createdAt: receivedAt,
+          trace: {
+            request: { url: request.url, method: 'POST', payload: request.payload },
+            response: { status, ok, json: raw, rawText },
+            timingMs: measuredTimingMs,
+          },
+        })
       }
 
       // Se houve "open_message" durante tools, mas o SSE ainda não estava conectado,
@@ -407,6 +487,11 @@ export default function Chat({ settings, onReset }: Props) {
         for (const ev of openEvents) {
           const t = ev.text
           const ts = typeof ev.createdAt === 'number' && Number.isFinite(ev.createdAt) ? ev.createdAt : now
+          const eventId = typeof ev.eventId === 'string' ? ev.eventId : undefined
+          if (eventId) {
+            if (seenOpenEventIdsRef.current.has(eventId)) continue
+            seenOpenEventIdsRef.current.add(eventId)
+          }
           // dedup simples (evita repetir em refresh/retry rápido)
           const last = lastOpenMsgRef.current
           if (
@@ -418,7 +503,7 @@ export default function Chat({ settings, onReset }: Props) {
             continue
           }
           lastOpenMsgRef.current = { threadId: tidForDedup, text: t, ts }
-          openMsgs.push({ id: uuid(), role: 'assistant', text: t, createdAt: ts })
+          openMsgs.push({ id: uuid(), role: 'assistant', text: t, createdAt: ts, eventId })
         }
       }
 
@@ -439,9 +524,9 @@ export default function Chat({ settings, onReset }: Props) {
             },
             userMsg,
             ...openMsgs,
-            assistantMsg,
+            ...assistantMsgs,
           ])
-          setSelectedId(assistantMsg.id)
+          setSelectedId(assistantMsgs[assistantMsgs.length - 1]?.id || null)
           setInspected(null)
           setInspectError(null)
           return
@@ -469,9 +554,9 @@ export default function Chat({ settings, onReset }: Props) {
               },
               userMsg,
               ...openMsgs,
-              assistantMsg,
+              ...assistantMsgs,
             ])
-            setSelectedId(assistantMsg.id)
+            setSelectedId(assistantMsgs[assistantMsgs.length - 1]?.id || null)
             setInspected(null)
             setInspectError(null)
             return
@@ -483,8 +568,8 @@ export default function Chat({ settings, onReset }: Props) {
       } catch {
         // ignore
       }
-      setMessages((prev) => [...prev, ...openMsgs, assistantMsg])
-      setSelectedId(assistantMsg.id)
+      setMessages((prev) => [...prev, ...openMsgs, ...assistantMsgs])
+      setSelectedId(assistantMsgs[assistantMsgs.length - 1]?.id || null)
       setInspected(null)
       setInspectError(null)
     } catch (e) {
@@ -836,6 +921,11 @@ export default function Chat({ settings, onReset }: Props) {
         if (!msg || typeof msg !== 'object') return
         if (msg.type === 'open_message' && typeof msg.text === 'string' && msg.text.trim()) {
           const text = msg.text.trim()
+          const eventId = typeof msg.event_id === 'string' ? msg.event_id : undefined
+          if (eventId) {
+            if (seenOpenEventIdsRef.current.has(eventId)) return
+            seenOpenEventIdsRef.current.add(eventId)
+          }
           const now = Date.now()
           const last = lastOpenMsgRef.current
           if (last && last.threadId === tid && last.text === text && now - last.ts < 5000) return
@@ -847,6 +937,7 @@ export default function Chat({ settings, onReset }: Props) {
               role: 'assistant',
               text,
               createdAt: now,
+              eventId,
             },
           ])
         }
@@ -922,10 +1013,10 @@ export default function Chat({ settings, onReset }: Props) {
                             const parsedItems = tryParseDisparoItemsFromText(m.text)
                             if (parsedItems?.length) return <MessageContent items={parsedItems} />
                             const parsed = tryParseCtaUrl(m.text)
-                            return parsed ? <MessageContent items={[parsed]} /> : <FormattedText text={m.text} />
+                            return parsed ? <MessageContent items={[parsed]} /> : <FormattedRichText text={m.text} />
                           })()
                         ) : (
-                          <FormattedText text={m.text} />
+                          <FormattedRichText text={m.text} />
                         )}
                       </div>
                       <div className={`msgMeta ${m.role === 'user' ? 'user' : ''}`}>

@@ -40,6 +40,8 @@ export type ChatMessage = {
   trace?: ApiTrace
   /** Itens ricos da resposta (text, cta_url, etc.) para renderização no ChatWeb */
   answerItems?: DisparoAnswerItem[]
+  /** ID opcional para deduplicar eventos SSE/open_message */
+  eventId?: string
 }
 
 export type DisparoAnswerItem =
