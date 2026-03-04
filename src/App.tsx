@@ -40,7 +40,7 @@ export default function App() {
         // Sem settings salvas, assumimos DEV (proxy do Vite) para buscar contexto.
         const base = ''
 
-        const tResp = await fetch(`${base}/v1/threads/${encodeURIComponent(tid)}/messages`)
+        const tResp = await fetch(`${base}/v1/threads/${encodeURIComponent(tid)}`)
         const tText = await tResp.text()
         if (!tResp.ok) throw new Error(`HTTP ${tResp.status}: ${tText}`)
         const tJson = tText ? (JSON.parse(tText) as any) : null
