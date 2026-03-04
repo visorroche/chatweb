@@ -480,3 +480,101 @@ a {
   vertical-align: middle;
 }
 
+/* Modal (Onboarding - localizar conversas) */
+.modalOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  z-index: 50;
+}
+
+.modal {
+  width: min(920px, 100%);
+  max-height: min(78vh, 780px);
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(10, 18, 32, 0.92));
+  box-shadow: 0 26px 70px rgba(0, 0, 0, 0.45);
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+.modalHeader {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.modalBody {
+  padding: 14px;
+  overflow: auto;
+}
+
+.threadList {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.threadRow {
+  text-align: left;
+  width: 100%;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 12px 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.06s ease;
+}
+
+.threadRow:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.threadRow:active {
+  transform: translateY(1px);
+}
+
+.threadRow:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.threadRowMain {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.threadRowTitle {
+  font-weight: 750;
+}
+
+.threadRowId {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.threadRowMeta {
+  margin-top: 8px;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+

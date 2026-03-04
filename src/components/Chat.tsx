@@ -113,35 +113,61 @@ function sanitizeHttpUrl(url: string): string | null {
 }
 
 function renderBoldNodes(text: string, keyPrefix: string): React.ReactNode[] {
-  // Interpreta *texto* como <strong>texto</strong>.
+  // Interpreta:
+  // - *texto* como <strong>texto</strong>
+  // - **texto** como <strong>texto</strong>
+  // Sem HTML (evita XSS).
   const nodes: React.ReactNode[] = []
   let i = 0
   let k = 0
-  while (i < text.length) {
-    const start = text.indexOf('*', i)
-    if (start === -1) {
-      const tail = text.slice(i)
-      if (tail) nodes.push(<span key={`${keyPrefix}t_${k++}`}>{tail}</span>)
-      break
-    }
-    const end = text.indexOf('*', start + 1)
-    if (end === -1) {
-      const tail = text.slice(i)
-      if (tail) nodes.push(<span key={`${keyPrefix}t_${k++}`}>{tail}</span>)
-      break
-    }
 
-    const before = text.slice(i, start)
-    if (before) nodes.push(<span key={`${keyPrefix}t_${k++}`}>{before}</span>)
-
-    const content = text.slice(start + 1, end)
-    if (content.trim().length === 0) {
-      nodes.push(<span key={`${keyPrefix}t_${k++}`}>{text.slice(start, end + 1)}</span>)
+  const pushText = (s: string) => {
+    if (s) nodes.push(<span key={`${keyPrefix}t_${k++}`}>{s}</span>)
+  }
+  const pushBold = (s: string, raw: string) => {
+    if (s.trim().length === 0) {
+      // Mantém literal para não “sumir” com marcadores vazios
+      pushText(raw)
     } else {
-      nodes.push(<strong key={`${keyPrefix}b_${k++}`}>{content}</strong>)
+      nodes.push(<strong key={`${keyPrefix}b_${k++}`}>{s}</strong>)
     }
+  }
+
+  while (i < text.length) {
+    const star = text.indexOf('*', i)
+    if (star === -1) {
+      pushText(text.slice(i))
+      break
+    }
+
+    // Texto antes do marcador
+    if (star > i) pushText(text.slice(i, star))
+
+    // **bold**
+    if (text.slice(star, star + 2) === '**') {
+      const end = text.indexOf('**', star + 2)
+      if (end === -1) {
+        // sem fechamento, mantém literal
+        pushText(text.slice(star))
+        break
+      }
+      const content = text.slice(star + 2, end)
+      pushBold(content, text.slice(star, end + 2))
+      i = end + 2
+      continue
+    }
+
+    // *bold*
+    const end = text.indexOf('*', star + 1)
+    if (end === -1) {
+      pushText(text.slice(star))
+      break
+    }
+    const content = text.slice(star + 1, end)
+    pushBold(content, text.slice(star, end + 1))
     i = end + 1
   }
+
   return nodes
 }
 
@@ -150,18 +176,25 @@ function FormattedRichText({ text }: { text: string }) {
   // - *negrito*
   // - links no padrão [Nome](http://...)
   // Sem usar HTML (evita XSS).
+  // Se a LLM imprimir lista markdown só pra destacar (ex.: "- **Item**"),
+  // removemos o prefixo "- " / "• " para evitar “bullets” visuais no chat.
+  const normalized = String(text)
+    .split('\n')
+    .map((ln) => ln.replace(/^\s*([-•])\s+(?=\*{1,2})/, ''))
+    .join('\n')
+
   const nodes: React.ReactNode[] = []
   const re = /\[([^\]]+)\]\(([^)\s]+)\)/g
   let last = 0
   let m: RegExpExecArray | null
   let idx = 0
-  while ((m = re.exec(text)) !== null) {
+  while ((m = re.exec(normalized)) !== null) {
     const start = m.index
     const full = m[0]
     const label = m[1] || ''
     const hrefRaw = m[2] || ''
     if (start > last) {
-      const chunk = text.slice(last, start)
+      const chunk = normalized.slice(last, start)
       nodes.push(...renderBoldNodes(chunk, `c${idx++}_`))
     }
     const href = sanitizeHttpUrl(hrefRaw)
@@ -184,8 +217,8 @@ function FormattedRichText({ text }: { text: string }) {
     }
     last = start + full.length
   }
-  if (last < text.length) {
-    nodes.push(...renderBoldNodes(text.slice(last), `c${idx++}_`))
+  if (last < normalized.length) {
+    nodes.push(...renderBoldNodes(normalized.slice(last), `c${idx++}_`))
   }
   return <>{nodes}</>
 }

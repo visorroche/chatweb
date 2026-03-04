@@ -11,12 +11,28 @@ function normalizeDigits(value: string): string {
 }
 
 type CompanyOption = { id: string; name: string | null }
+type ThreadSummary = { id: string | null; created_at: string | null; closed_at: string | null; last_interaction: string | null }
 
 const API_OPTIONS = [
   // DEV usa proxy do Vite (evita CORS). O proxy aponta para http://0.0.0.0:8008
   { id: 'DEV', label: 'DEV', baseUrl: '' },
   { id: 'PROD', label: 'PROD', baseUrl: 'https://api.zibb.com.br' },
 ] as const
+
+function formatIso(iso: string | null): string {
+  if (!iso) return '—'
+  try {
+    const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return iso
+    const dd = String(d.getDate()).padStart(2, '0')
+    const mm = String(d.getMonth() + 1).padStart(2, '0')
+    const hh = String(d.getHours()).padStart(2, '0')
+    const mi = String(d.getMinutes()).padStart(2, '0')
+    return `${dd}/${mm} ${hh}:${mi}`
+  } catch {
+    return iso
+  }
+}
 
 export default function Onboarding({ initial, onStart }: Props) {
   const initialApi = useMemo(() => {
@@ -41,6 +57,11 @@ export default function Onboarding({ initial, onStart }: Props) {
   const [companiesError, setCompaniesError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
+
+  const [finderOpen, setFinderOpen] = useState(false)
+  const [finderLoading, setFinderLoading] = useState(false)
+  const [finderError, setFinderError] = useState<string | null>(null)
+  const [foundThreads, setFoundThreads] = useState<ThreadSummary[]>([])
 
   useEffect(() => {
     let cancelled = false
@@ -101,6 +122,44 @@ export default function Onboarding({ initial, onStart }: Props) {
     const json = text ? (JSON.parse(text) as any) : null
     const tid = (json?.thread_id || '').trim()
     return tid || null
+  }
+
+  async function loadThreadsForCustomer(): Promise<void> {
+    const cid = companyId.trim()
+    const phone = normalizeDigits(customerPhone)
+    if (!cid || !phone) return
+
+    setFinderLoading(true)
+    setFinderError(null)
+    setFoundThreads([])
+    try {
+      const base = (apiBaseUrl || '').trim().replace(/\/+$/, '')
+      const url = base
+        ? `${base}/v1/threads/by_customer?company_id=${encodeURIComponent(cid)}&customer_phone=${encodeURIComponent(phone)}`
+        : `/v1/threads/by_customer?company_id=${encodeURIComponent(cid)}&customer_phone=${encodeURIComponent(phone)}`
+      const resp = await fetch(url)
+      const text = await resp.text()
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${text}`)
+      const json = text ? (JSON.parse(text) as any) : null
+      const threads = (json?.threads || []) as any[]
+      setFoundThreads(Array.isArray(threads) ? (threads as ThreadSummary[]) : [])
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Erro ao localizar conversas'
+      setFinderError(msg)
+      setFoundThreads([])
+    } finally {
+      setFinderLoading(false)
+    }
+  }
+
+  function startWithThread(threadId: string | null) {
+    setThreadIdInLocation(threadId && threadId.trim() ? threadId.trim() : null)
+    onStart({
+      companyId: companyId.trim(),
+      customerPhone: normalizeDigits(customerPhone),
+      customerName: customerName.trim() || undefined,
+      apiBaseUrl,
+    })
   }
 
   return (
@@ -176,6 +235,16 @@ export default function Onboarding({ initial, onStart }: Props) {
 
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
           <button
+            className="btn"
+            disabled={!canStart || starting}
+            onClick={async () => {
+              setFinderOpen(true)
+              await loadThreadsForCustomer()
+            }}
+          >
+            Localizar conversas
+          </button>
+          <button
             className="btn primary"
             disabled={!canStart || starting}
             onClick={async () => {
@@ -193,12 +262,7 @@ export default function Onboarding({ initial, onStart }: Props) {
                 setStarting(false)
               }
 
-              onStart({
-                companyId: companyId.trim(),
-                customerPhone: normalizeDigits(customerPhone),
-                customerName: customerName.trim() || undefined,
-                apiBaseUrl,
-              })
+              startWithThread((new URL(window.location.href).searchParams.get('thread_id') || '').trim() || null)
             }}
           >
             {starting ? 'Carregando…' : 'Iniciar conversa'}
@@ -206,6 +270,80 @@ export default function Onboarding({ initial, onStart }: Props) {
         </div>
         {startError ? <div className="helper" style={{ color: 'rgba(255,255,255,0.8)', marginTop: 10 }}>{startError}</div> : null}
       </div>
+
+      {finderOpen ? (
+        <div
+          className="modalOverlay"
+          onClick={() => {
+            if (finderLoading) return
+            setFinderOpen(false)
+          }}
+          role="presentation"
+        >
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Localizar conversas"
+          >
+            <div className="modalHeader">
+              <div style={{ fontWeight: 700 }}>Conversas do número</div>
+              <button className="btn" disabled={finderLoading} onClick={() => setFinderOpen(false)}>
+                Fechar
+              </button>
+            </div>
+            <div className="modalBody">
+              <div className="helper" style={{ marginTop: 0 }}>
+                company: <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}>{companyId.trim()}</span> •
+                telefone: <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}>{normalizeDigits(customerPhone)}</span>
+              </div>
+
+              <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
+                <button className="btn" disabled={finderLoading} onClick={loadThreadsForCustomer}>
+                  {finderLoading ? 'Buscando…' : 'Atualizar'}
+                </button>
+              </div>
+
+              {finderError ? <div className="helper" style={{ color: 'rgba(255,255,255,0.8)', marginTop: 10 }}>{finderError}</div> : null}
+
+              {!finderLoading && !finderError && foundThreads.length === 0 ? (
+                <div className="helper" style={{ marginTop: 10 }}>
+                  Nenhuma thread encontrada para esse número nessa company.
+                </div>
+              ) : null}
+
+              <div className="threadList">
+                {foundThreads.map((t, idx) => {
+                  const id = (t?.id || '').trim()
+                  return (
+                    <button
+                      key={id || String(idx)}
+                      className="threadRow"
+                      disabled={!id}
+                      onClick={() => {
+                        setFinderOpen(false)
+                        startWithThread(id || null)
+                      }}
+                      title={id || ''}
+                    >
+                      <div className="threadRowMain">
+                        <div className="threadRowTitle">Thread</div>
+                        <div className="threadRowId">{id || '—'}</div>
+                      </div>
+                      <div className="threadRowMeta">
+                        <span>criada: {formatIso(t?.created_at ?? null)}</span>
+                        <span>última: {formatIso(t?.last_interaction ?? null)}</span>
+                        <span>fechada: {formatIso(t?.closed_at ?? null)}</span>
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
