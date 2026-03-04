@@ -369,7 +369,7 @@ function extractConversationContextFromResponseJson(json: unknown): Conversation
 
 function extractOpenMessagesFromSteps(rawResponse: unknown): Array<{ eventId?: string; text: string; createdAt: number }> {
   try {
-    const steps = (rawResponse as any)?.steps
+    const steps = Array.isArray(rawResponse) ? rawResponse : (rawResponse as any)?.steps
     if (!Array.isArray(steps)) return []
     const out: Array<{ eventId?: string; text: string; createdAt: number }> = []
     for (const s of steps) {
@@ -672,10 +672,24 @@ export default function Chat({ settings, onReset }: Props) {
     return Date.now()
   }
 
+  function getStepsFromMessageRow(row: any): any[] | null {
+    try {
+      const md = row?.metadata
+      if (md && typeof md === 'object' && Array.isArray((md as any).steps)) {
+        return (md as any).steps
+      }
+    } catch {
+      // ignore
+    }
+    return null
+  }
+
   function buildSyntheticTraceFromThreadMessage(thread: any, row: any, timingMs: number) {
     try {
       const ta = row?.thread_assistant || null
       const asst = ta?.assistant || null
+      const steps = getStepsFromMessageRow(row)
+      const outputRaw = typeof row?.output === 'string' ? row.output : null
       const payload = {
         success: true,
         provider: 'simple',
@@ -689,6 +703,7 @@ export default function Chat({ settings, onReset }: Props) {
           external_id: asst?.external_id ?? undefined,
           thread_assistant_external_id: ta?.external_id ?? undefined,
         },
+        steps: steps ?? undefined,
       }
       return {
         request: {
@@ -700,7 +715,7 @@ export default function Chat({ settings, onReset }: Props) {
           status: 200,
           ok: true,
           json: payload,
-          rawText: null,
+          rawText: outputRaw,
         },
         timingMs,
       }
@@ -737,6 +752,7 @@ export default function Chat({ settings, onReset }: Props) {
         },
       ]
 
+      const seenOpenIds = new Set<string>()
       for (const row of rows) {
         const createdAt = parseDateToMs(row?.created_at)
         const repliedAt = row?.replied_at != null ? parseDateToMs(row?.replied_at) : null
@@ -750,6 +766,24 @@ export default function Chat({ settings, onReset }: Props) {
             text: input,
             createdAt,
           })
+        }
+
+        // Se houver steps no metadata, reconstituir mensagens intermediárias (open_message) do histórico.
+        const rowSteps = getStepsFromMessageRow(row)
+        if (rowSteps?.length) {
+          const openMsgs = extractOpenMessagesFromSteps(rowSteps)
+          for (const om of openMsgs) {
+            const key = (om.eventId || `${om.createdAt}:${om.text}`).trim()
+            if (key && seenOpenIds.has(key)) continue
+            if (key) seenOpenIds.add(key)
+            nextMessages.push({
+              id: uuid(),
+              role: 'assistant',
+              text: om.text,
+              createdAt: om.createdAt,
+              eventId: om.eventId,
+            })
+          }
         }
 
         if (typeof output === 'string' && output.trim()) {
